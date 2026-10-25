@@ -1,0 +1,121 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isUserActive() {
+      return isAuthenticated() && getUserData().aktif == true;
+    }
+    
+    function hasRole(role) {
+      return isUserActive() && getUserData().role == role;
+    }
+    
+    function isSuperAdmin() {
+      return hasRole('super_admin');
+    }
+    
+    function isDokter() {
+      return hasRole('dokter');
+    }
+    
+    function isResepsionis() {
+      return hasRole('resepsionis');
+    }
+    
+    function isPasien() {
+      return hasRole('pasien');
+    }
+
+    // 1. Koleksi: users (PRD Bab 2.2, 2.3, 6.2, 7.1)
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      
+      // Akun dibuat oleh pemilik UID sendiri
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      
+      // Update: Super admin bisa ubah semua field termasuk role dan status aktif.
+      // Pengguna biasa hanya boleh ubah nama & noHp miliknya, TIDAK bisa ubah role & aktif.
+      allow update: if isSuperAdmin() || (
+        isAuthenticated() 
+        && request.auth.uid == userId 
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.aktif == resource.data.aktif
+      );
+      
+      allow delete: if isSuperAdmin();
+    }
+
+    // 2. Koleksi: layanan (PRD Bab 4.14, 7.1)
+    match /layanan/{layananId} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+
+    // 3. Koleksi: jadwal_dokter (PRD Bab 4.15, 7.1)
+    match /jadwal_dokter/{jadwalId} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+
+    // 4. Koleksi: janji_temu (PRD Bab 4.3, 4.7, 4.9, 6.2, 7.1)
+    match /janji_temu/{janjiId} {
+      // Pasien hanya bisa baca miliknya; dokter hanya janji yang ia tangani;
+      // Resepsionis & Super Admin bisa baca semua janji.
+      allow read: if isSuperAdmin() 
+        || isResepsionis()
+        || (isDokter() && resource.data.dokterId == request.auth.uid)
+        || (isPasien() && resource.data.pasienId == request.auth.uid);
+
+      // Pasien membuat janji untuk dirinya sendiri dengan status 'menunggu'
+      allow create: if isSuperAdmin() 
+        || isResepsionis()
+        || (isPasien() 
+            && request.resource.data.pasienId == request.auth.uid
+            && request.resource.data.status == 'menunggu');
+
+      // Update:
+      // - Pasien hanya boleh membatalkan janji miliknya
+      // - Resepsionis boleh konfirmasi, jadwal ulang, batalkan, tandai hadir
+      // - Dokter boleh tandai selesai untuk janji miliknya
+      // - Super Admin akses penuh
+      allow update: if isSuperAdmin()
+        || isResepsionis()
+        || (isDokter() && resource.data.dokterId == request.auth.uid)
+        || (isPasien() 
+            && resource.data.pasienId == request.auth.uid
+            && request.resource.data.status == 'dibatalkan'
+            && (resource.data.status == 'menunggu' || resource.data.status == 'dikonfirmasi'));
+
+      allow delete: if isSuperAdmin();
+    }
+
+    // 5. Koleksi: catatan_perawatan (PRD Bab 2.3, 2.4, 4.10, 4.11, 6.2, 7.1)
+    // Resepsionis dilarang keras membaca catatan perawatan
+    match /catatan_perawatan/{catatanId} {
+      allow read: if isSuperAdmin()
+        || (isDokter() && resource.data.dokterId == request.auth.uid)
+        || (isPasien() && resource.data.pasienId == request.auth.uid);
+
+      // Hanya dokter yang menangani (atau super admin) yang dapat membuat catatan perawatan
+      allow create: if isSuperAdmin()
+        || (isDokter() && request.resource.data.dokterId == request.auth.uid);
+
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // 6. Koleksi: slot_terisi (PRD Bab 4.3.1, 7.1)
+    match /slot_terisi/{slotId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+  }
+}
